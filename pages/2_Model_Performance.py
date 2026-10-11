@@ -88,13 +88,13 @@ hr {
 """, unsafe_allow_html=True)
 
 # ---------- Page Heading ----------
-st.title("Model Performance")
-st.markdown(
-    '<div class="page-subtitle">'
-    'Evaluate machine-learning models for predictive maintenance.'
-    '</div>',
-    unsafe_allow_html=True
-)
+st.markdown("""
+<div class="hero-banner">
+    <h1>Model Performance</h1>
+    <p>Evaluate machine-learning models for predictive maintenance.</p>
+</div>
+""", unsafe_allow_html=True)
+
 
 st.markdown("""
 <div class="info-banner">

@@ -148,13 +148,12 @@ hr {
 
 
 # ---------- Page Header ----------
-st.title("Machine Failure Prediction")
-st.markdown(
-    '<p class="page-subtitle">'
-    'Evaluate machine operating conditions and estimate failure risk.'
-    '</p>',
-    unsafe_allow_html=True
-)
+st.markdown("""
+<div class="hero-banner">
+    <h1>Machine Failure Prediction</h1>
+    <p>Evaluate machine operating conditions and estimate failure risk.</p>
+</div>
+""", unsafe_allow_html=True)
 
 st.info(
     "This academic prototype estimates failure risk; it cannot guarantee "

@@ -277,6 +277,32 @@ st.markdown(
             background-color: #163B56 !important;
             border-color: #163B56 !important;
         }
+        /* Hide Streamlit's toolbar menu */
+        [data-testid="stToolbar"] [data-testid="stMainMenu"] {
+         display: none !important;
+        }
+        .hero-banner {
+    background: linear-gradient(135deg, #10263D, #1B405B);
+    padding: 32px 36px;
+    border-radius: 18px;
+    margin-bottom: 28px;
+    color: #FFFFFF;
+}
+
+.hero-banner h1 {
+    color: #FFFFFF !important;
+    font-size: 2.2rem;
+    font-weight: 750;
+    margin: 0 0 14px 0;
+}
+
+.hero-banner p {
+    color: #FFFFFF !important;
+    font-size: 1rem;
+    line-height: 1.7;
+    margin: 0;
+}
+
 
     </style>
     """,
