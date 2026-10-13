@@ -3,6 +3,8 @@ import streamlit as st
 import pandas as pd
 import joblib
 import re
+import io
+import hashlib
 from pathlib import Path
 
 st.set_page_config(
@@ -149,6 +151,7 @@ AI4I_ALIASES = {
     "toolwearminutes": ("Tool wear [min]", "none"),
     "toolwear": ("Tool wear [min]", "none"),
 }
+
 
 # ---------- New Sensor Feature Aliases ----------
 
@@ -358,7 +361,73 @@ uploaded_file = st.file_uploader(
     key="dataset_upload_csv"
 )
 
-if uploaded_file is None:
+# ---------- Preserve Uploaded Dataset ----------
+
+# Keep the uploaded dataframe in Session State so it survives
+# navigation between Dataset Upload and Explainability.
+
+if uploaded_file is not None:
+    try:
+        file_bytes = uploaded_file.getvalue()
+        uploaded_df = pd.read_csv(io.BytesIO(file_bytes))
+
+        if uploaded_df.empty or len(uploaded_df.columns) == 0:
+            st.error("The uploaded CSV contains no usable data.")
+            st.stop()
+
+        current_upload_signature = (
+            uploaded_file.name,
+            hashlib.sha256(file_bytes).hexdigest()
+        )
+
+        previous_signature = st.session_state.get("upload_signature")
+
+        # Clear previous predictions only when a different CSV is uploaded.
+        if previous_signature != current_upload_signature:
+            st.session_state.pop("upload_prediction_results", None)
+            st.session_state.pop("upload_prepared_inputs", None)
+            st.session_state.pop("upload_model_key", None)
+            st.session_state.pop("upload_model_type", None)
+            st.session_state.pop("explain_uploaded_record", None)
+
+        st.session_state["uploaded_dataset_df"] = uploaded_df.copy()
+        st.session_state["uploaded_dataset_name"] = uploaded_file.name
+        st.session_state["upload_signature"] = current_upload_signature
+
+    except Exception as e:
+        st.error(f"Could not read the uploaded CSV: {e}")
+        st.stop()
+
+elif "uploaded_dataset_df" in st.session_state:
+    # Restore the previous dataset when returning from another page.
+    uploaded_df = st.session_state["uploaded_dataset_df"].copy()
+
+    current_upload_signature = st.session_state.get("upload_signature")
+
+    st.success(
+        f"Using saved dataset: "
+        f"{st.session_state.get('uploaded_dataset_name', 'Uploaded CSV')}"
+    )
+
+    if st.button(
+        "Clear uploaded dataset",
+        key="clear_uploaded_dataset"
+    ):
+        for key in [
+            "uploaded_dataset_df",
+            "uploaded_dataset_name",
+            "upload_signature",
+            "upload_prediction_results",
+            "upload_prepared_inputs",
+            "upload_model_key",
+            "upload_model_type",
+            "explain_uploaded_record",
+        ]:
+            st.session_state.pop(key, None)
+
+        st.rerun()
+
+else:
     col1, col2 = st.columns(2)
 
     with col1:
@@ -396,37 +465,6 @@ if uploaded_file is None:
     )
 
     st.stop()
-
-
-# ---------- Read Uploaded CSV ----------
-
-try:
-    uploaded_df = pd.read_csv(uploaded_file)
-
-    if uploaded_df.empty:
-        st.error("The uploaded CSV contains no data rows.")
-        st.stop()
-
-    if len(uploaded_df.columns) == 0:
-        st.error("The uploaded CSV contains no columns.")
-        st.stop()
-
-except Exception as e:
-    st.error(f"Could not read the uploaded CSV: {e}")
-    st.stop()
-
-
-# ---------- Clear Stale Results ----------
-
-current_upload_signature = (
-    uploaded_file.name,
-    uploaded_file.size,
-    tuple(uploaded_df.columns)
-)
-
-if st.session_state.get("upload_signature") != current_upload_signature:
-    st.session_state.pop("upload_prediction_results", None)
-    st.session_state["upload_signature"] = current_upload_signature
 
 
 # ---------- File Preview ----------
@@ -611,10 +649,21 @@ if st.button(
 
         results_df["Model Used"] = selected_model_type
 
+        # Save prediction results and prepared inputs for page navigation.
         st.session_state["upload_prediction_results"] = results_df
+        st.session_state["upload_prepared_inputs"] = prepared_df.copy()
+
+        st.session_state["upload_model_key"] = (
+            "AI4I Model"
+            if selected_model_type == "AI4I machine features"
+            else "New Sensor Model"
+        )
+
+        st.session_state["upload_model_type"] = selected_model_type
 
     except Exception as e:
         st.session_state.pop("upload_prediction_results", None)
+        st.session_state.pop("upload_prepared_inputs", None)
 
         st.error(
             "Prediction failed. No results were generated. "
@@ -651,11 +700,83 @@ if "upload_prediction_results" in st.session_state:
     with col3:
         st.metric("Normal Operation", f"{normal_count:,}")
 
+    st.caption(
+        "Rows highlighted in red indicate a model-predicted failure risk. "
+        "Select a record below to open its individual explanation."
+    )
+
+    # Highlight failure-risk rows.
+    def highlight_failure_rows(row):
+        if row.get("Predicted Status") == "Failure Risk Detected":
+            return [
+                "background-color: #FDE2E2; "
+                "color: #991B1B; font-weight: 600;"
+            ] * len(row)
+
+        return [""] * len(row)
+
     st.dataframe(
-        results_df,
-        hide_index=True,
+        results_df.style.apply(highlight_failure_rows, axis=1),
+        hide_index=False,
         use_container_width=True
     )
+
+    st.markdown("### Explain a specific machine")
+
+    selected_row = st.selectbox(
+        "Select uploaded row (row numbers start at 0)",
+        options=list(range(len(results_df))),
+        format_func=lambda i: (
+            f"Row {i} — {results_df.iloc[i]['Predicted Status']} — "
+            f"{results_df.iloc[i]['Estimated Failure Probability (%)']:.2f}% estimated risk"
+        ),
+        key="upload_selected_row"
+    )
+
+    selected_status = results_df.iloc[selected_row]["Predicted Status"]
+
+    if selected_status == "Failure Risk Detected":
+        st.warning(
+            f"Row {selected_row} is flagged as failure risk by the model."
+        )
+    else:
+        st.info(
+            f"Row {selected_row} is classified as normal operation by the model."
+        )
+
+    if st.button(
+        "Explain This Machine",
+        type="primary",
+        use_container_width=True
+    ):
+        saved_inputs = st.session_state.get("upload_prepared_inputs")
+
+        if saved_inputs is None or len(saved_inputs) != len(results_df):
+            st.error(
+                "The prepared model inputs are unavailable. "
+                "Please generate predictions again."
+            )
+        else:
+            # Store the exact selected record for the Explainability page.
+            st.session_state["explain_uploaded_record"] = {
+                "model_key": st.session_state.get("upload_model_key"),
+                "model_type": st.session_state.get("upload_model_type"),
+                "row_index": int(selected_row),
+                "features": saved_inputs.iloc[selected_row].to_dict(),
+                "probability": (
+                    float(
+                        results_df.iloc[selected_row][
+                            "Estimated Failure Probability (%)"
+                        ]
+                    ) / 100.0
+                ),
+                "status": str(
+                    results_df.iloc[selected_row]["Predicted Status"]
+                ),
+                "source": "uploaded_csv",
+            }
+
+            st.switch_page("pages/3_Explainability.py")
 
     csv_data = results_df.to_csv(index=False).encode("utf-8")
 

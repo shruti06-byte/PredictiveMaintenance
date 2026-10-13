@@ -1,508 +1,756 @@
 
 import streamlit as st
 import pandas as pd
-import joblib
-import shap
+import numpy as np
 import matplotlib.pyplot as plt
+import shap
+import joblib
 from pathlib import Path
 
 st.set_page_config(
-    page_title="Model Explainability",
+    page_title="Model Explainability | PredictiveAI",
     page_icon="🧠",
     layout="wide"
 )
 
-# -------------------- THEME AND PATHS --------------------
-NAVY = "#10243A"
-MID_BLUE = "#365D83"
-TEXT = "#25364A"
-GREY = "#64748B"
-
 BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+
+AI4I_MODEL_PATH = BASE_DIR / "model.pkl"
+NEW_MODEL_PATH = BASE_DIR / "model_new_features.pkl"
+
+AI4I_DATA_PATH = DATA_DIR / "ai4i2020.csv"
+NEW_DATA_PATH = DATA_DIR / "synthetic_new_features_test.csv"
+
+AI4I_FEATURES = [
+    "Type",
+    "Air temperature [K]",
+    "Process temperature [K]",
+    "Rotational speed [rpm]",
+    "Torque [Nm]",
+    "Tool wear [min]"
+]
+
+NEW_FEATURES = [
+    "Vibration_mm_s",
+    "Pressure_bar",
+    "Humidity_percent",
+    "Motor_Current_A",
+    "Acoustic_Level_dB",
+    "Bearing_Temperature_C"
+]
 
 MODEL_CONFIG = {
     "AI4I Model": {
-        "model_path": BASE_DIR / "model.pkl",
-        "data_path": BASE_DIR / "data" / "ai4i2020.csv",
-        "features": [
-            "Type",
-            "Air temperature [K]",
-            "Process temperature [K]",
-            "Rotational speed [rpm]",
-            "Torque [Nm]",
-            "Tool wear [min]"
-        ],
+        "model_path": AI4I_MODEL_PATH,
+        "data_path": AI4I_DATA_PATH,
+        "features": AI4I_FEATURES,
         "target": "Machine failure",
-        "description": "Original AI4I 2020 machine-failure model and dataset.",
-        "synthetic": False,
+        "threshold": 0.30,
+        "description": "Original AI4I 2020 machine-failure model."
     },
     "New Sensor Model": {
-        "model_path": BASE_DIR / "model_new_features.pkl",
-        "data_path": BASE_DIR / "data" / "synthetic_new_features_test.csv",
-        "features": [
-            "Vibration_mm_s",
-            "Pressure_bar",
-            "Humidity_percent",
-            "Motor_Current_A",
-            "Acoustic_Level_dB",
-            "Bearing_Temperature_C"
-        ],
+        "model_path": NEW_MODEL_PATH,
+        "data_path": NEW_DATA_PATH,
+        "features": NEW_FEATURES,
         "target": "Machine_Failure",
-        "description": "Additional sensor-feature model trained on synthetic demonstration data.",
-        "synthetic": True,
-    },
+        "threshold": 0.50,
+        "description": (
+            "Demonstration model trained on synthetic sensor data. "
+            "It is not validated for real-world industrial use."
+        )
+    }
 }
 
-# -------------------- PAGE STYLING --------------------
-st.markdown(f"""
-<style>
-.stApp {{
-    background-color: #F5F7FA;
-    color: {TEXT};
-}}
-[data-testid="stSidebar"] {{
-    background-color: {NAVY};
-}}
-[data-testid="stSidebar"] * {{
-    color: white;
-}}
-.block-container {{
-    max-width: 1500px;
-    padding-top: 2rem;
-    padding-bottom: 3rem;
-}}
-.explain-header {{
-    background: linear-gradient(110deg, {NAVY}, #243F5B);
-    padding: 28px 32px;
-    border-radius: 16px;
-    margin-bottom: 22px;
-    color: white;
-}}
-.explain-header h1 {{
-    color: white;
-    font-size: 30px;
-    margin: 0 0 8px 0;
-}}
-.explain-header p {{
-    color: #DCE6F0;
-    font-size: 15px;
-    margin: 0;
-}}
-.section-heading {{
-    color: {NAVY};
-    font-size: 21px;
-    font-weight: 700;
-    margin-top: 8px;
-    margin-bottom: 5px;
-}}
-div[data-testid="stMetric"] {{
-    background: white;
-    border: 1px solid #DFE7EF;
-    border-radius: 12px;
-    padding: 18px;
-}}
-div[data-testid="stMetricLabel"] {{
-    color: {GREY};
-}}
-div[data-testid="stMetricValue"] {{
-    color: {NAVY};
-}}
-div[data-testid="stDataFrame"] {{
-    border: 1px solid #DFE7EF;
-    border-radius: 10px;
-    overflow: hidden;
-}}
-div[data-testid="stNumberInput"] label {{
-    color: {NAVY};
-    font-weight: 600;
-}}
-hr {{
-    border-color: #DCE4ED;
-}}
-</style>
-""", unsafe_allow_html=True)
-
-
-# -------------------- CACHED LOADERS --------------------
-@st.cache_data
-def load_data(data_path):
-    return pd.read_csv(data_path)
+NAVY = "#10243A"
+TEXT = "#243B53"
+RED = "#DC2626"
+GREEN = "#16A34A"
 
 
 @st.cache_resource
-def load_model(model_path):
-    return joblib.load(model_path)
+def load_model(path):
+    return joblib.load(path)
 
 
-# -------------------- SHAP HELPERS --------------------
-def style_chart(ax):
-    ax.set_facecolor("white")
-    ax.title.set_color(NAVY)
-    ax.xaxis.label.set_color(TEXT)
-    ax.yaxis.label.set_color(TEXT)
-    ax.tick_params(colors=TEXT)
-    ax.grid(axis="x", linestyle="--", alpha=0.2)
-    ax.set_axisbelow(True)
+@st.cache_data
+def load_dataset(path):
+    return pd.read_csv(path)
 
 
-def transform_features(model, frame):
-    """Return preprocessed model inputs, classifier, and feature names."""
-    if hasattr(model, "named_steps"):
-        transformed = model[:-1].transform(frame)
-        classifier = model.steps[-1][1]
-        preprocessing = model[:-1]
+def readable_feature(name):
+    name = str(name)
 
+    for prefix in (
+        "remainder__",
+        "num__",
+        "cat__",
+        "onehotencoder__",
+        "ordinalencoder__"
+    ):
+        name = name.replace(prefix, "")
+
+    name = name.replace("machine_type_Type_", "Machine type ")
+    name = name.replace("_", " ")
+    return name
+
+
+def get_failure_probability(model, record):
+    probabilities = model.predict_proba(record)[0]
+    classes = list(model.classes_)
+
+    if 1 not in classes:
+        raise ValueError(
+            "The model does not contain a failure class labelled 1."
+        )
+
+    return float(probabilities[classes.index(1)])
+
+
+def get_transformed_feature_names(model, features):
+    if hasattr(model, "get_feature_names_out"):
         try:
-            names = preprocessing.get_feature_names_out()
+            return list(model.get_feature_names_out())
         except Exception:
-            names = [
-                f"Feature {i + 1}"
-                for i in range(transformed.shape[1])
-            ]
-    else:
-        transformed = frame
-        classifier = model
-        names = list(frame.columns)
+            pass
 
-    if hasattr(transformed, "toarray"):
-        transformed = transformed.toarray()
+    if hasattr(model, "named_steps"):
+        for step in model.named_steps.values():
+            if hasattr(step, "get_feature_names_out"):
+                try:
+                    return list(step.get_feature_names_out(features))
+                except Exception:
+                    pass
 
-    return transformed, classifier, list(names)
+    return list(features)
 
 
-def get_failure_shap_values(shap_values):
-    """Handle common SHAP output formats for binary classification."""
-    if isinstance(shap_values, list):
-        return shap_values[1] if len(shap_values) > 1 else shap_values[0]
+def calculate_shap_values(model, record, background):
+    """
+    Explain the failure-class output of the fitted pipeline.
+    Use TreeExplainer first, with a model-agnostic fallback.
+    """
+    transformed_record = record
+    transformed_background = background
 
-    if getattr(shap_values, "ndim", 0) == 3:
-        return shap_values[:, :, 1]
+    if hasattr(model, "named_steps"):
+        step_names = list(model.named_steps.keys())
 
-    return shap_values
+        if len(step_names) >= 2:
+            preprocessing = model[:-1]
+
+            transformed_record = preprocessing.transform(record)
+            transformed_background = preprocessing.transform(background)
+
+            if hasattr(transformed_record, "toarray"):
+                transformed_record = transformed_record.toarray()
+
+            if hasattr(transformed_background, "toarray"):
+                transformed_background = transformed_background.toarray()
+
+    feature_names = get_transformed_feature_names(
+        model, record.columns
+    )
+
+    final_estimator = model
+
+    if hasattr(model, "named_steps") and len(model.named_steps) > 0:
+        final_estimator = list(model.named_steps.values())[-1]
+
+    try:
+        explainer = shap.TreeExplainer(final_estimator)
+        shap_values = explainer.shap_values(transformed_record)
+
+        if isinstance(shap_values, list):
+            classes = list(
+                getattr(final_estimator, "classes_", [])
+            )
+
+            if 1 in classes:
+                shap_values = shap_values[classes.index(1)]
+            else:
+                shap_values = shap_values[-1]
+
+        values = np.asarray(shap_values)
+
+        if values.ndim == 3:
+            classes = list(
+                getattr(final_estimator, "classes_", [])
+            )
+            class_index = (
+                classes.index(1)
+                if 1 in classes
+                else values.shape[-1] - 1
+            )
+            values = values[:, :, class_index]
+
+        values = values.reshape(1, -1)[0]
+
+        if len(values) == len(feature_names):
+            expected = explainer.expected_value
+
+            if isinstance(expected, (list, np.ndarray)):
+                expected_array = np.asarray(expected).reshape(-1)
+                classes = list(
+                    getattr(final_estimator, "classes_", [])
+                )
+
+                expected = (
+                    expected_array[classes.index(1)]
+                    if len(expected_array) > 1 and 1 in classes
+                    else expected_array[-1]
+                )
+
+            return (
+                values,
+                feature_names,
+                float(np.asarray(expected).reshape(-1)[0])
+            )
+
+    except Exception:
+        pass
+
+    background_sample = background.sample(
+        n=min(30, len(background)),
+        random_state=42
+    )
+
+    try:
+        explainer = shap.Explainer(
+            model.predict_proba,
+            background_sample
+        )
+
+        explanation = explainer(record)
+        values = np.asarray(explanation.values)
+
+        classes = list(model.classes_)
+        failure_index = classes.index(1)
+
+        if values.ndim == 3:
+            values = values[0, :, failure_index]
+        elif values.ndim == 2:
+            values = values[0]
+
+        feature_names = list(record.columns)
+
+        return values.reshape(-1), feature_names, float("nan")
+
+    except Exception as error:
+        raise RuntimeError(
+            "SHAP could not explain this model. "
+            "Check the model preprocessing and feature configuration. "
+            f"Details: {error}"
+        ) from error
 
 
-def get_failure_expected_value(explainer):
-    value = explainer.expected_value
+# ---------- Header ----------
 
-    if hasattr(value, "__len__") and not isinstance(value, str):
-        return value[1] if len(value) > 1 else value[0]
+st.markdown(
+    """
+    <style>
+        .stApp {
+            background-color: #F5F7FA;
+        }
 
-    return value
+        [data-testid="stSidebar"] {
+            background: linear-gradient(
+                180deg, #10243A 0%, #16324A 100%
+            );
+        }
 
+        [data-testid="stSidebar"] * {
+            color: #F0F6FC;
+        }
 
-def make_explainer(classifier, transformed_sample):
-    """Create a tree explainer and calculate SHAP values."""
-    explainer = shap.TreeExplainer(classifier)
-    values = explainer.shap_values(transformed_sample)
+        .explain-header {
+            background: linear-gradient(
+                110deg, #10243A, #29445F
+            );
+            padding: 28px 32px;
+            border-radius: 16px;
+            margin-bottom: 22px;
+        }
 
-    return explainer, get_failure_shap_values(values)
+        .explain-header h1 {
+            color: white;
+            font-size: 30px;
+        }
 
+        .explain-header p {
+            color: #E2E8F0;
+            margin-bottom: 0;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
-# -------------------- PAGE HEADER --------------------
-st.markdown("""
-<div class="explain-header">
-    <h1>Model Explainability</h1>
-    <p>Understand which machine parameters influence the model's failure predictions.</p>
-</div>
-""", unsafe_allow_html=True)
+st.markdown(
+    """
+    <div class="explain-header">
+        <h1>Model Explainability</h1>
+        <p>
+            Understand which machine parameters influence the model's
+            failure predictions and why a particular record was classified.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 st.info(
-    "SHAP helps explain how input features influence model predictions. "
-    "These explanations describe model behaviour, not guaranteed causes of failure."
+    "SHAP explains how the model uses input features. "
+    "It does not prove that a feature physically causes a machine failure."
 )
 
 
-# -------------------- MODEL SELECTOR --------------------
-st.markdown(
-    '<p class="section-heading">Choose a Model</p>',
-    unsafe_allow_html=True
+# ---------- Model Selection ----------
+
+uploaded_context = st.session_state.get("explain_uploaded_record")
+
+preferred_model = (
+    uploaded_context.get("model_key")
+    if isinstance(uploaded_context, dict)
+    else None
+)
+
+model_names = list(MODEL_CONFIG.keys())
+
+default_index = (
+    model_names.index(preferred_model)
+    if preferred_model in model_names
+    else 0
 )
 
 selected_model_name = st.selectbox(
     "Model and dataset",
-    list(MODEL_CONFIG.keys()),
-    help="Each model uses its own matching feature set and dataset."
+    model_names,
+    index=default_index
 )
 
 config = MODEL_CONFIG[selected_model_name]
-
 st.caption(config["description"])
 
-if config["synthetic"]:
-    st.warning(
-        "The New Sensor Model uses synthetic demonstration data. "
-        "Its explanations illustrate model behaviour and are not "
-        "validated real-world failure causes."
-    )
+if not config["model_path"].exists():
+    st.error(f"Model file not found: {config['model_path'].name}")
+    st.stop()
 
+if not config["data_path"].exists():
+    st.error(f"Dataset file not found: {config['data_path'].name}")
+    st.stop()
 
-# -------------------- LOAD SELECTED MODEL --------------------
 try:
-    if not config["model_path"].exists():
-        st.error(f"Model file not found: {config['model_path'].name}")
-        st.stop()
-
-    if not config["data_path"].exists():
-        st.error(f"Dataset file not found: {config['data_path'].name}")
-        st.stop()
-
-    df = load_data(str(config["data_path"]))
     model = load_model(str(config["model_path"]))
+    df = load_dataset(str(config["data_path"]))
+except Exception as error:
+    st.error(f"Could not load model or dataset: {error}")
+    st.stop()
 
-    features = config["features"]
-    target = config["target"]
+features = config["features"]
 
-    missing_columns = [
-        column for column in features + [target]
-        if column not in df.columns
-    ]
+missing_features = [
+    feature for feature in features
+    if feature not in df.columns
+]
 
-    if missing_columns:
+if missing_features:
+    st.error(
+        "The reference dataset is missing required features: "
+        + ", ".join(missing_features)
+    )
+    st.stop()
+
+display_df = df[features].copy()
+
+
+# ---------- Dataset Overview ----------
+
+st.markdown("### Dataset Overview")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.metric("Total Records", f"{len(df):,}")
+
+with col2:
+    st.metric("Input Features", len(features))
+
+with col3:
+    if config["target"] in df.columns:
+        st.metric(
+            "Recorded Failures",
+            int((df[config["target"]] == 1).sum())
+        )
+    else:
+        st.metric("Recorded Failures", "Not available")
+
+
+# ---------- Select Record ----------
+
+uploaded_context_matches = (
+    isinstance(uploaded_context, dict)
+    and uploaded_context.get("model_key") == selected_model_name
+    and uploaded_context.get("source") == "uploaded_csv"
+)
+
+st.markdown("### Select a Machine Record")
+
+if uploaded_context_matches:
+    st.success(
+        f"Explaining uploaded CSV row "
+        f"{uploaded_context.get('row_index')}."
+    )
+
+    uploaded_features = uploaded_context.get("features", {})
+
+    try:
+        record = pd.DataFrame(
+            [{
+                feature: uploaded_features[feature]
+                for feature in features
+            }],
+            columns=features
+        )
+    except KeyError as error:
         st.error(
-            "The selected dataset is missing required columns: "
-            + ", ".join(missing_columns)
+            f"The uploaded record is missing a required feature: {error}"
         )
         st.stop()
-
-    if df.empty:
-        st.warning("The selected dataset contains no records to explain.")
-        st.stop()
-
-    # Prepare the displayed data.
-    display_df = df.copy()
-
-    if "Type" in features:
-        display_df["Type"] = display_df["Type"].astype(str)
-
-
-    # -------------------- DATASET OVERVIEW --------------------
-    st.markdown(
-        '<p class="section-heading">Dataset Overview</p>',
-        unsafe_allow_html=True
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric("Total Records", f"{len(df):,}")
-
-    with col2:
-        st.metric("Input Features", len(features))
-
-    with col3:
-        failure_count = int(
-            pd.to_numeric(
-                df[target], errors="coerce"
-            ).fillna(0).sum()
-        )
-        st.metric("Recorded Failures", f"{failure_count:,}")
-
-    st.divider()
-
-
-    # -------------------- GLOBAL FEATURE IMPORTANCE --------------------
-    st.markdown(
-        '<p class="section-heading">Global Feature Importance</p>',
-        unsafe_allow_html=True
-    )
-
-    st.caption(
-        "Mean absolute SHAP values estimate the average contribution "
-        "of each model input to the failure-class output across a sample."
-    )
-
-    sample_size = min(100, len(display_df))
-
-    sample = display_df[features].sample(
-        n=sample_size,
-        random_state=42
-    ).copy()
-
-    transformed_sample, classifier, feature_names = transform_features(
-        model, sample
-    )
-
-    explainer, values = make_explainer(
-        classifier, transformed_sample
-    )
-
-    importance = pd.DataFrame({
-        "Feature": feature_names,
-        "Mean Absolute SHAP Value": abs(values).mean(axis=0)
-    }).sort_values(
-        "Mean Absolute SHAP Value",
-        ascending=False
-    )
-
-    col1, col2 = st.columns([0.9, 1.1], gap="large")
-
-    with col1:
-        st.markdown("**Feature Importance Values**")
-
-        display_importance = importance.copy()
-
-        display_importance["Mean Absolute SHAP Value"] = (
-            display_importance["Mean Absolute SHAP Value"].round(5)
-        )
-
-        st.dataframe(
-            display_importance,
-            hide_index=True,
-            width="stretch"
-        )
-
-    with col2:
-        st.markdown("**Importance Ranking**")
-
-        plot_data = importance.sort_values(
-            "Mean Absolute SHAP Value",
-            ascending=True
-        )
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-        fig.patch.set_facecolor("white")
-
-        ax.barh(
-            plot_data["Feature"],
-            plot_data["Mean Absolute SHAP Value"],
-            color=MID_BLUE
-        )
-
-        ax.set_xlabel("Mean absolute SHAP value")
-        ax.set_title("Global Feature Importance", pad=14)
-
-        style_chart(ax)
-        fig.tight_layout()
-
-        st.pyplot(fig)
-        plt.close(fig)
-
-    st.caption(
-        "Larger mean absolute SHAP values indicate greater average "
-        "influence on model output. They do not show whether a feature "
-        "increases or decreases risk and do not prove causation."
-    )
-
-    st.divider()
-
-
-    # -------------------- INDIVIDUAL PREDICTION EXPLANATION --------------------
-    st.markdown(
-        '<p class="section-heading">Explain an Individual Prediction</p>',
-        unsafe_allow_html=True
-    )
-
-    st.caption(
-        "Select a dataset record to inspect its input values, estimated "
-        "failure probability, and SHAP explanation."
-    )
-
-    record_index = st.number_input(
-        "Dataset record index",
-        min_value=0,
-        max_value=len(df) - 1,
-        value=0,
-        step=1
-    )
-
-    record = display_df.iloc[[int(record_index)]][features].copy()
-
-    st.markdown("**Selected Machine Record**")
 
     st.dataframe(
         record,
         hide_index=True,
-        width="stretch"
+        use_container_width=True
     )
 
-    if st.button("Explain Selected Record", type="primary"):
-        probabilities = model.predict_proba(record)[0]
-        classes = list(model.classes_)
+else:
+    record_index = st.number_input(
+        "Dataset record index",
+        min_value=0,
+        max_value=len(display_df) - 1,
+        value=0,
+        step=1
+    )
 
-        if 1 not in classes:
-            st.error(
-                "The selected model does not expose a failure class labelled 1."
-            )
-            st.stop()
+    record = display_df.iloc[[int(record_index)]].copy()
 
-        failure_probability = float(
-            probabilities[classes.index(1)]
+    st.dataframe(
+        record,
+        hide_index=True,
+        use_container_width=True
+    )
+
+
+# ---------- Prediction ----------
+
+st.markdown("### Prediction Result")
+
+if st.button(
+    "Generate Predictions",
+    type="primary",
+    use_container_width=True
+):
+    try:
+        failure_probability = get_failure_probability(model, record)
+        prediction = int(
+            failure_probability >= config["threshold"]
         )
 
-        prediction = int(model.predict(record)[0])
+        st.session_state["explain_manual_prediction"] = {
+            "model_key": selected_model_name,
+            "probability": failure_probability,
+            "prediction": prediction,
+            "record": record.copy()
+        }
 
-        col1, col2 = st.columns(2)
+    except Exception as error:
+        st.error(f"Prediction failed: {error}")
 
-        with col1:
-            st.metric(
-                "Estimated Failure Probability",
-                f"{failure_probability:.2%}"
-            )
+manual_result = st.session_state.get("explain_manual_prediction")
 
-        with col2:
-            st.metric(
-                "Model Prediction",
-                "Failure Risk Detected"
-                if prediction == 1
-                else "Normal Operation"
-            )
+if (
+    isinstance(manual_result, dict)
+    and manual_result.get("model_key") == selected_model_name
+    and manual_result.get("record") is not None
+    and manual_result["record"].equals(record)
+):
+    failure_probability = manual_result["probability"]
+    prediction = manual_result["prediction"]
 
-        st.caption(
-            "This is the model's estimated probability, not a guarantee "
-            "that the machine will or will not fail."
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.metric(
+            "Estimated Failure Probability",
+            f"{failure_probability:.2%}"
         )
 
-        st.markdown("**Factors Influencing This Prediction**")
-
-        st.write(
-            "The SHAP waterfall chart shows how each transformed feature "
-            "moves the model output away from its expected output for "
-            "the selected record."
+    with col2:
+        st.metric(
+            "Model Prediction",
+            "Failure Risk Detected"
+            if prediction == 1
+            else "Normal Operation"
         )
 
-        transformed_record, _, record_feature_names = transform_features(
-            model, record
+    if prediction == 1:
+        st.error(
+            "The model classified this record as having a failure risk."
         )
-
-        individual_explainer, individual_values = make_explainer(
-            classifier, transformed_record
+    else:
+        st.success(
+            "The model classified this record as normal operation."
         )
-
-        explanation = shap.Explanation(
-            values=individual_values[0],
-            base_values=get_failure_expected_value(
-                individual_explainer
-            ),
-            data=transformed_record[0],
-            feature_names=record_feature_names
-        )
-
-        plt.figure(figsize=(10, 5))
-
-        shap.plots.waterfall(
-            explanation,
-            max_display=10,
-            show=False
-        )
-
-        st.pyplot(plt.gcf(), clear_figure=True)
-        plt.close("all")
-
-
-    # -------------------- FOOTER --------------------
-    st.divider()
 
     st.caption(
-        "Important: SHAP explains the behaviour of the selected trained "
-        "model. It does not prove that a feature causes machine failure. "
-        "Each model is explained using its matching dataset."
+        "This is a model-estimated probability, not a guarantee "
+        "of the machine's actual condition."
     )
 
-except Exception as e:
-    st.error("The explainability page could not be loaded.")
+else:
+    st.info(
+        "Click Generate Predictions to evaluate the selected machine."
+    )
+    st.stop()
 
-    st.warning(
-        "Please share the terminal error so we can identify the exact issue."
+
+# ---------- SHAP Explanation ----------
+
+st.markdown("### Factors Influencing This Prediction")
+
+st.write(
+    "The graph shows how each feature moves the model's failure-class "
+    "output up or down for the selected record."
+)
+
+try:
+    background = display_df.sample(
+        n=min(100, len(display_df)),
+        random_state=42
     )
 
-    st.code(str(e))
+    shap_values, feature_names, expected_value = calculate_shap_values(
+        model,
+        record,
+        background
+    )
+
+    if len(shap_values) != len(feature_names):
+        raise ValueError(
+            "The number of SHAP values does not match the feature names."
+        )
+
+    contribution_df = pd.DataFrame({
+        "Feature": feature_names,
+        "SHAP value": shap_values
+    })
+
+    contribution_df["Absolute impact"] = (
+        contribution_df["SHAP value"].abs()
+    )
+
+    contribution_df = contribution_df.sort_values(
+        "Absolute impact",
+        ascending=True
+    ).tail(10)
+
+    chart_colors = [
+        RED if value > 0 else GREEN
+        for value in contribution_df["SHAP value"]
+    ]
+
+    fig, ax = plt.subplots(
+        figsize=(10, max(4.5, 0.48 * len(contribution_df)))
+    )
+
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+
+    # Bars with numerical SHAP labels
+    bars = ax.barh(
+        [readable_feature(name) for name in contribution_df["Feature"]],
+        contribution_df["SHAP value"],
+        color=chart_colors
+    )
+
+    ax.bar_label(
+        bars,
+        labels=[
+            f"{value:+.4f}"
+            for value in contribution_df["SHAP value"]
+        ],
+        padding=5,
+        fontsize=9,
+        color=TEXT
+    )
+
+    # Expand both sides so numeric labels remain visible
+    min_value = min(
+        0.0,
+        float(contribution_df["SHAP value"].min())
+    )
+    max_value = max(
+        0.0,
+        float(contribution_df["SHAP value"].max())
+    )
+
+    value_range = max(max_value - min_value, 0.01)
+
+    ax.set_xlim(
+        min_value - value_range * 0.25,
+        max_value + value_range * 0.25
+    )
+
+    ax.axvline(0, color="#64748B", linewidth=1)
+
+    ax.set_xlabel(
+        "SHAP contribution to failure-class output",
+        color=TEXT
+    )
+
+    ax.set_title(
+        "Feature Contributions for This Machine",
+        color=NAVY,
+        pad=12
+    )
+
+    ax.tick_params(axis="both", colors=TEXT)
+    ax.grid(axis="x", linestyle="--", alpha=0.2)
+    ax.set_axisbelow(True)
+
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown(
+            f"<span style='color:{RED};font-weight:700'>"
+            "■ Towards failure</span>",
+            unsafe_allow_html=True
+        )
+
+    with col2:
+        st.markdown(
+            f"<span style='color:{GREEN};font-weight:700'>"
+            "■ Away from failure</span>",
+            unsafe_allow_html=True
+        )
+
+    st.caption(
+        "Red features increase the model's failure-class output; "
+        "green features decrease it. This colour convention refers to "
+        "SHAP contributions, not directly to the machine's final status."
+    )
+
+
+    # ---------- Record-Specific Explanation ----------
+
+    st.markdown("### Why did the model make this prediction?")
+
+    sorted_pairs = sorted(
+        zip(feature_names, shap_values),
+        key=lambda pair: abs(float(pair[1])),
+        reverse=True
+    )
+
+    pushing_failure = [
+        (name, float(value))
+        for name, value in sorted_pairs
+        if value > 1e-8
+    ]
+
+    pushing_normal = [
+        (name, float(value))
+        for name, value in sorted_pairs
+        if value < -1e-8
+    ]
+
+    if prediction == 1:
+        st.error(
+            f"**Failure risk detected.** The model estimated a failure "
+            f"probability of {failure_probability:.2%}. Its final output "
+            "crossed the configured classification threshold. "
+            "The positive SHAP contributions below show which features "
+            "pushed the model towards failure."
+        )
+    else:
+        st.success(
+            f"**Normal operation predicted.** The model estimated a failure "
+            f"probability of {failure_probability:.2%}, which is below the "
+            f"{config['threshold']:.0%} classification threshold. "
+            "Some features may still increase the failure-class output, "
+            "but the final prediction remained normal."
+        )
+
+    if pushing_failure:
+        st.markdown("#### Features pushing towards failure")
+
+        for name, value in pushing_failure[:3]:
+            st.write(
+                f"- **{readable_feature(name)}** pushed the model's "
+                f"failure-class output upwards "
+                f"(SHAP contribution: +{value:.4f})."
+            )
+    else:
+        st.write(
+            "No positive SHAP contributions were identified for this record."
+        )
+
+    if pushing_normal:
+        st.markdown("#### Features pushing away from failure")
+
+        for name, value in pushing_normal[:3]:
+            st.write(
+                f"- **{readable_feature(name)}** pushed the model's "
+                f"failure-class output downwards "
+                f"(SHAP contribution: {value:.4f})."
+            )
+    else:
+        st.write(
+            "No negative SHAP contributions were identified for this record."
+        )
+
+    if sorted_pairs:
+        strongest_name, strongest_value = sorted_pairs[0]
+
+        st.markdown("#### Overall interpretation")
+
+        if strongest_value > 0:
+            st.write(
+                f"The strongest individual contributor was "
+                f"**{readable_feature(strongest_name)}**, which pushed "
+                "the model towards the failure class."
+            )
+        elif strongest_value < 0:
+            st.write(
+                f"The strongest individual contributor was "
+                f"**{readable_feature(strongest_name)}**, which pushed "
+                "the model away from the failure class."
+            )
+        else:
+            st.write(
+                "The displayed features had no non-zero SHAP contribution."
+            )
+
+    st.info(
+        "These explanations describe the behaviour of the trained model. "
+        "They do not prove that a sensor value physically caused or "
+        "prevented a machine failure. Confirm suspected issues through "
+        "inspection and appropriate maintenance procedures."
+    )
+
+except Exception as error:
+    st.error(
+        "The prediction was generated, but its SHAP explanation could "
+        "not be calculated."
+    )
+
+    st.code(str(error))
+
+    st.info(
+        "Check the model's preprocessing pipeline, feature configuration, "
+        "and installed SHAP version."
+    )
